@@ -1,15 +1,17 @@
-
 import argparse
 import json
 import os
 import sys
 
 import numpy as np
-import cv2
 from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
-
+from preprocessing import preprocess_image_bytes
+import logging
+from exceptions import PreprocessingError, ModelExecutionError
 from model_utils import ensure_model_file, get_model_path, get_model_url, get_model_sha256
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model loading (lazy singleton)
@@ -50,7 +52,7 @@ SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif
 
 
 def preprocess_image(image_path: str) -> np.ndarray:
-    """Read, resize, and normalise an image for the model.
+    """Read and preprocess an image for the model via shared byte-based pipeline.
 
     Parameters
     ----------
@@ -67,7 +69,9 @@ def preprocess_image(image_path: str) -> np.ndarray:
     FileNotFoundError
         When *image_path* does not exist on disk.
     ValueError
-        When the file exists but cannot be decoded as an image.
+        When the file extension is not supported.
+    PreprocessingError
+        When the file exists but cannot be decoded or preprocessed.
     """
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -79,20 +83,13 @@ def preprocess_image(image_path: str) -> np.ndarray:
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(
-            f"Could not decode image: {image_path}. "
-            "The file may be corrupt or in an unsupported format."
-        )
-
-    # cv2.imread returns BGR; the model was trained on RGB (via PIL/ImageDataGenerator).
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = cv2.resize(image, (96, 96))
-    image = img_to_array(image)
-    image = np.expand_dims(image, axis=0)
-    image = image / 255.0
-    return image
+    try:
+        with open(image_path, "rb") as file_handle:
+            image_bytes = file_handle.read()
+        return preprocess_image_bytes(image_bytes)
+    except Exception as e:
+        logger.error(f"Image preprocessing failed for {image_path}: {e}", exc_info=True)
+        raise PreprocessingError(f"Failed to preprocess image: {str(e)}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +111,28 @@ def predict_image(image_path: str, model_path: str | None = None) -> dict:
     dict
         ``{"image": str, "label": "Real"|"Fake", "confidence": float,
            "raw": list[float]}``
+
+    Raises
+    ------
+    FileNotFoundError
+        When *image_path* does not exist on disk.
+    ValueError
+        When the file extension is not supported.
+    PreprocessingError
+        When the image cannot be decoded or preprocessed.
+    ModelExecutionError
+        When model inference fails.
     """
-    model = load_deepfake_model(model_path)
     image = preprocess_image(image_path)
-    prediction = model.predict(image, verbose=0)
+
+    try:
+        model = load_deepfake_model(model_path)
+        prediction = model.predict(image, verbose=0)
+    except (PreprocessingError, FileNotFoundError, ValueError):
+        raise
+    except Exception as e:
+        logger.error(f"Model prediction failed: {e}", exc_info=True)
+        raise ModelExecutionError(f"Model prediction failed: {str(e)}") from e
 
     class_index = int(np.argmax(prediction, axis=1)[0])
     confidence = float(np.max(prediction)) * 100
@@ -196,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = predict_image(image_path, model_path=args.model)
             results.append(result)
-        except (FileNotFoundError, ValueError) as exc:
+        except (FileNotFoundError, ValueError, PreprocessingError, ModelExecutionError) as exc:
             # Non-fatal: report the error and continue with remaining images.
             error_result = {
                 "image": image_path,
