@@ -34,10 +34,7 @@ Click on the **Fork** button at the top-right corner of the repository page.
 
 ```bash
 git clone https://github.com/your-username/PixelTruth.git
-
-## 🤝 How to Contribute
-
-Follow these steps to contribute to the project:
+```
 
 ### 3. Move into the Project Directory
 
