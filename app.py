@@ -144,20 +144,8 @@ def render_missing_model_help():
 
 # ----------------------- IMAGE PIPELINE --------------------
 def preprocess_image(image):
-    return preprocess_image_array(image)
-
-
-def preprocess_uploaded_image(image_bytes):
-    return preprocess_image_bytes(image_bytes)
-
-
-preprocess_uploaded_image.cache_clear = preprocess_image_bytes.cache_clear
-preprocess_uploaded_image.cache_info = preprocess_image_bytes.cache_info
-
-def preprocess_image(image):
-    # Use the shared preprocessing implementation when possible
+    """Preprocess a BGR numpy image for model inference."""
     try:
-        # If preprocessing was implemented in `preprocessing.py`, prefer that
         return preprocess_image_array(image)
     except Exception:
         # Fallback to an inline implementation (keeps compatibility with main branch)
@@ -170,13 +158,21 @@ def preprocess_image(image):
 
 
 def preprocess_uploaded_image(image_bytes):
-    # Keep the PR's caching wrapper which delegates to preprocessing.preprocess_image_bytes
+    """Preprocess raw uploaded image bytes for model inference (cached)."""
     return preprocess_image_bytes(image_bytes)
 
 
 # Expose cache control helpers so tests and callers can clear or inspect cache
 preprocess_uploaded_image.cache_clear = preprocess_image_bytes.cache_clear
 preprocess_uploaded_image.cache_info = preprocess_image_bytes.cache_info
+
+
+def find_last_conv_layer(model):
+    """Walk model layers in reverse to find the last convolutional layer name."""
+    for layer in reversed(model.layers):
+        if "conv" in layer.name.lower():
+            return layer.name
+    raise ValueError("No convolution layer found in model")
 
 
 def predict_image(image):
@@ -443,8 +439,6 @@ with col_perf1:
 
     if os.path.exists("Figure_2.png"):
 
-        st.image("Figure_2.png", use_column_width=True)
-
         st.image("Figure_2.png", use_container_width=True)
     else:
 
@@ -456,8 +450,6 @@ with col_perf2:
     st.markdown("**Training Loss Curve**")
 
     if os.path.exists("Figure_1.png"):
-
-        st.image("Figure_1.png", use_column_width=True)
 
         st.image("Figure_1.png", use_container_width=True)
 
