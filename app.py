@@ -1,40 +1,18 @@
+import argparse
+import json
 import os
-import cv2
+import sys
+
 import numpy as np
-import pandas as pd
-from datetime import datetime
-import streamlit as st
+from preprocessing import preprocess_image_bytes
 import logging
-
-from preprocessing import (
-    decode_image_bytes,
-    preprocess_image_array,
-    preprocess_image_bytes,
-)
-
-from utils.model_loader import load_cached_model
-
-from gradcam import (
-    make_gradcam_heatmap,
-    overlay_heatmap,
-    find_last_conv_layer,
-)
 
 from exceptions import (
     PreprocessingError,
     ModelExecutionError,
 )
 
-from metrics import (
-    get_sample_metrics,
-    get_confusion_matrix_plot,
-    get_roc_curve_plot,
-    get_dataset_distribution_plot,
-    get_class_statistics,
-    get_confusion_matrix_caption,
-    get_roc_curve_caption,
-    get_dataset_distribution_caption,
-)
+from utils.model_loader import load_cached_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,571 +21,284 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# ---------------- PAGE CONFIG ----------------
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
 
-st.set_page_config(
-    page_title="PixelTruth",
-    page_icon="🔍",
-    layout="wide"
-)
+SUPPORTED_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+    ".tiff",
+    ".tif"
+}
 
-# ---------------- CUSTOM CSS ----------------
 
-custom_css = """
-<style>
-.stApp {
-    background: radial-gradient(circle at top left, #1d2671, #050816 40%, #000000 80%);
-    color: #e5e7eb;
-}
-.main-title {
-    font-size: 3rem;
-    font-weight: 800;
-    text-align: center;
-    background: linear-gradient(90deg,#ff4b91,#facc15,#22c55e);
-    -webkit-background-clip: text;
-    color: transparent;
-    letter-spacing: 0.08em;
-    margin-bottom: 0.2rem;
-}
-.sub-title {
-    text-align:center;
-    color:#9ca3af;
-    font-size:0.95rem;
-    margin-bottom: 1.8rem;
-}
-.glass-card {
-    background: rgba(15,23,42,0.78);
-    border-radius: 18px;
-    padding: 1.3rem 1.6rem;
-    border: 1px solid rgba(148,163,184,0.35);
-    box-shadow: 0 18px 45px rgba(15,23,42,0.9);
-    backdrop-filter: blur(18px);
-}
-.result-real {
-    border-left: 5px solid #22c55e;
-}
-.result-fake {
-    border-left: 5px solid #ef4444;
-}
-.result-uncertain {
-    border-left: 5px solid #f59e0b;
-}
-.upload-box > div {
-    border-radius: 18px !important;
-    border: 1px dashed rgba(148,163,184,0.65) !important;
-    background: rgba(15,23,42,0.6) !important;
-}
-.metric-small .stMetric {
-    text-align: left;
-}
-footer {
-    visibility: hidden;
-}
-</style>
-"""
+def preprocess_image(image_path: str) -> np.ndarray:
+    """Read and preprocess an image for the model via shared byte-based pipeline.
 
-st.markdown(custom_css, unsafe_allow_html=True)
+    Parameters
+    ----------
+    image_path:
+        Filesystem path to the image file.
 
-# ---------------- CONFIDENCE THRESHOLD ----------------
+    Returns
+    -------
+    np.ndarray
+        Shape ``(1, 96, 96, 3)``, values in ``[0, 1]``.
 
-LOW_CONFIDENCE_THRESHOLD = 0.70
+    Raises
+    ------
+    FileNotFoundError
+        When *image_path* does not exist on disk.
 
-# ---------------- LOAD MODEL ----------------
+    ValueError
+        When the file extension is not supported.
 
-with st.spinner("Loading AI model and warming up..."):
+    PreprocessingError
+        When the file exists but cannot be decoded or preprocessed.
+    """
+
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    ext = os.path.splitext(image_path)[1].lower()
+
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file extension '{ext}'. "
+            f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
 
     try:
 
+        with open(image_path, "rb") as file_handle:
+            image_bytes = file_handle.read()
+
+        return preprocess_image_bytes(image_bytes)
+
+    except Exception as e:
+
+        logger.error(
+            f"Image preprocessing failed for {image_path}: {e}",
+            exc_info=True
+        )
+
+        raise PreprocessingError(
+            f"Failed to preprocess image: {str(e)}"
+        ) from e
+
+
+# ---------------------------------------------------------------------------
+# Prediction
+# ---------------------------------------------------------------------------
+
+def predict_image(
+    image_path: str,
+    model_path: str | None = None
+) -> dict:
+    """Run deepfake detection on a single image.
+
+    Parameters
+    ----------
+    image_path:
+        Path to the image to classify.
+
+    model_path:
+        Optional override for the model file location.
+
+    Returns
+    -------
+    dict
+        ``{"image": str, "label": "Real"|"Fake", "confidence": float,
+           "raw": list[float]}``
+
+    Raises
+    ------
+    FileNotFoundError
+        When *image_path* does not exist on disk.
+
+    ValueError
+        When the file extension is not supported.
+
+    PreprocessingError
+        When the image cannot be decoded or preprocessed.
+
+    ModelExecutionError
+        When model inference fails.
+    """
+
+    image = preprocess_image(image_path)
+
+    try:
+
+        # Cached lazy-loaded model
         model = load_cached_model()
 
-        st.toast("✅ Model warmed up successfully!")
+        prediction = model.predict(image, verbose=0)
+
+    except (
+        PreprocessingError,
+        FileNotFoundError,
+        ValueError
+    ):
+        raise
 
     except Exception as e:
 
-        st.error(f"Error loading model: {str(e)}")
-
-        model = None
-
-# ---------------- IMAGE PREPROCESSING ----------------
-
-def preprocess_image(image):
-
-    return preprocess_image_array(image)
-
-
-def preprocess_uploaded_image(image_bytes):
-
-    return preprocess_image_bytes(image_bytes)
-
-
-preprocess_uploaded_image.cache_clear = preprocess_image_bytes.cache_clear
-preprocess_uploaded_image.cache_info = preprocess_image_bytes.cache_info
-
-# ---------------- PREDICTION ----------------
-
-def predict_image(image):
-
-    if model is None:
-        return None, None, None
-
-    processed_image = preprocess_image(image)
-
-    try:
-
-        prediction = model.predict(processed_image, verbose=0)
-
-        class_label = np.argmax(prediction, axis=1)[0]
-
-        confidence = float(np.max(prediction))
-
-        label = "Real" if class_label == 0 else "Fake"
-
-        return label, confidence, processed_image
-
-    except Exception as e:
-
-        logger.error(f"Model inference failed: {e}", exc_info=True)
+        logger.error(
+            f"Model prediction failed: {e}",
+            exc_info=True
+        )
 
         raise ModelExecutionError(
             f"Model prediction failed: {str(e)}"
         ) from e
 
-# ---------------- HEADER ----------------
+    class_index = int(np.argmax(prediction, axis=1)[0])
 
-st.markdown(
-    "<h1 class='main-title'>DEEPFAKE SENTINEL</h1>",
-    unsafe_allow_html=True
-)
+    confidence = float(np.max(prediction)) * 100
 
-st.markdown(
-    "<p class='sub-title'>AI-powered detection of manipulated social media images.</p>",
-    unsafe_allow_html=True,
-)
+    # Dataset mapping:
+    # class 0 = Real
+    # class 1 = Fake
+    label = "Fake" if class_index == 1 else "Real"
 
-if os.path.exists("coverpage.png"):
+    return {
+        "image": image_path,
+        "label": label,
+        "confidence": round(confidence, 1),
+        "raw": prediction[0].tolist(),
+    }
 
-    st.image("coverpage.png", use_column_width=True)
 
-# ---------------- TOP INFO SECTION ----------------
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
-col_info_left, col_info_right = st.columns([2, 1])
+def build_parser() -> argparse.ArgumentParser:
 
-with col_info_left:
-
-    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-
-    st.subheader("🧠 Understanding Deepfakes")
-
-    st.markdown(
-        """
-- Deepfakes are AI-generated images or videos where one person's face or identity is swapped with another.
-- They can be used in entertainment and education, but also for misinformation, fraud, and privacy attacks.
-- Detection models focus on subtle artifacts in lighting, edges, blending, and facial structure that humans often miss.
-        """
+    parser = argparse.ArgumentParser(
+        prog="predict.py",
+        description=(
+            "PixelTruth — deepfake image detector.\n"
+            "Classifies one or more images as Real or Fake."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python predict.py photo.jpg\n"
+            "  python predict.py img1.jpg img2.png --json\n"
+            "  python predict.py --model /weights/model.h5 photo.jpg\n\n"
+            "Environment variables:\n"
+            "  PIXELTRUTH_MODEL_PATH   path to model file\n"
+            "  PIXELTRUTH_MODEL_URL    URL to download model if missing\n"
+            "  PIXELTRUTH_MODEL_SHA256 expected SHA-256 of the model file"
+        ),
     )
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with col_info_right:
-
-    st.markdown("<div class='glass-card metric-small'>", unsafe_allow_html=True)
-
-    st.subheader("📈 Model Snapshot")
-
-    st.metric("Training Accuracy", "95%")
-    st.metric("Input Size", "96 × 96 pixels")
-    st.metric("Task", "Binary classification (Real / Fake)")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- DETECTION SECTION ----------------
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-col_left, col_right = st.columns([1.3, 1])
-
-with col_left:
-
-    st.markdown("<div class='glass-card upload-box'>", unsafe_allow_html=True)
-
-    st.subheader("🖼 Upload an Image")
-
-    uploaded_file = st.file_uploader(
-        "Drop or browse a social media image",
-        type=["jpg", "jpeg", "png", "webp"],
-        label_visibility="collapsed",
+    parser.add_argument(
+        "images",
+        metavar="IMAGE",
+        nargs="+",
+        help="path(s) to image file(s) to classify",
     )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    parser.add_argument(
+        "--model",
+        metavar="PATH",
+        default=None,
+        help=(
+            "path to the .h5 model file "
+            "(default: $PIXELTRUTH_MODEL_PATH or "
+            "'deepfake_detection_model.h5')"
+        ),
+    )
 
-    MAX_FILE_SIZE_MB = 10
-    MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+    parser.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="print results as JSON (useful for scripting)",
+    )
 
-    uploaded_image_bytes = None
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress informational messages; only print results",
+    )
 
-    if uploaded_file is not None:
+    return parser
 
-        if uploaded_file.size > MAX_FILE_SIZE_BYTES:
 
-            st.error(
-                f"⚠️ File too large: "
-                f"{uploaded_file.size / (1024 * 1024):.1f} MB"
+def main(argv: list[str] | None = None) -> int:
+    """Entry point. Returns 0 on success, 1 if any image fails."""
+
+    parser = build_parser()
+
+    args = parser.parse_args(argv)
+
+    results = []
+
+    exit_code = 0
+
+    for image_path in args.images:
+
+        try:
+
+            result = predict_image(
+                image_path,
+                model_path=args.model
             )
 
-            image = None
+            results.append(result)
 
-        else:
+        except (
+            FileNotFoundError,
+            ValueError,
+            PreprocessingError,
+            ModelExecutionError
+        ) as exc:
 
-            try:
+            error_result = {
+                "image": image_path,
+                "error": str(exc),
+            }
 
-                raw_bytes = uploaded_file.read()
+            results.append(error_result)
 
-                uploaded_image_bytes = raw_bytes
+            exit_code = 1
 
-                uploaded_file.seek(0)
+            if not args.quiet:
+                print(f"[ERROR] {exc}", file=sys.stderr)
 
-                image = decode_image_bytes(raw_bytes)
+    if args.output_json:
 
-            except Exception as e:
-
-                st.error(
-                    f"⚠️ Could not read the file: {e}"
-                )
-
-                image = None
-
-        if image is not None:
-
-            st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-
-            st.subheader("🔍 Preview")
-
-            st.image(
-                image,
-                channels="BGR",
-                caption="Uploaded Image",
-                use_container_width=True
+        print(
+            json.dumps(
+                results if len(results) > 1 else results[0],
+                indent=2
             )
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
-with col_right:
-
-    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-
-    st.subheader("📊 Detection Result")
-
-    if uploaded_file is None:
-
-        st.write("Upload an image to run deepfake detection.")
-
-    elif model is None:
-
-        st.error("Model could not be loaded.")
-
-    elif image is None:
-
-        st.info("Upload a valid image.")
+        )
 
     else:
 
-        with st.spinner("Analyzing image with the deepfake model..."):
+        for result in results:
 
-            try:
+            if "error" in result:
+                continue
 
-                if uploaded_image_bytes is not None:
+            if not args.quiet:
+                print(f"\nImage      : {result['image']}")
+                print(f"Raw output : {result['raw']}")
 
-                    processed_image = preprocess_uploaded_image(
-                        uploaded_image_bytes
-                    )
+            print(f"Prediction : {result['label']}")
+            print(f"Confidence : {result['confidence']:.1f}%")
 
-                    prediction = model.predict(
-                        processed_image,
-                        verbose=0
-                    )
+    return exit_code
 
-                    class_label = np.argmax(prediction, axis=1)[0]
 
-                    confidence = float(np.max(prediction))
-
-                    label = "Real" if class_label == 0 else "Fake"
-
-                else:
-
-                    label, confidence, processed_image = predict_image(image)
-
-            except PreprocessingError as e:
-
-                logger.error(
-                    f"Caught PreprocessingError in UI: {e}",
-                    exc_info=True
-                )
-
-                st.error(
-                    "⚠️ There was an issue processing the uploaded image."
-                )
-
-                label, confidence, processed_image = None, None, None
-
-            except ModelExecutionError as e:
-
-                logger.error(
-                    f"Caught ModelExecutionError in UI: {e}",
-                    exc_info=True
-                )
-
-                st.error(
-                    "⚠️ The AI model encountered an error during analysis."
-                )
-
-                label, confidence, processed_image = None, None, None
-
-            except Exception as e:
-
-                logger.error(
-                    f"Caught unexpected Runtime error in UI: {e}",
-                    exc_info=True
-                )
-
-                st.error(
-                    "⚠️ An unexpected runtime error occurred."
-                )
-
-                label, confidence, processed_image = None, None, None
-
-        if label is not None:
-
-            if "prediction_history" not in st.session_state:
-
-                st.session_state.prediction_history = []
-
-            st.session_state.prediction_history.append({
-                "Filename": uploaded_file.name,
-                "Result": label,
-                "Confidence (%)": f"{confidence * 100:.1f}",
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-
-            # ---------------- GRAD-CAM ----------------
-
-            try:
-
-                backbone_model = model.layers[0]
-
-                last_conv_layer = find_last_conv_layer(
-                    backbone_model
-                )
-
-                heatmap = make_gradcam_heatmap(
-                    processed_image,
-                    backbone_model,
-                    last_conv_layer
-                )
-
-                gradcam_image = overlay_heatmap(
-                    image,
-                    heatmap
-                )
-
-            except Exception as e:
-
-                logger.warning(
-                    f"Grad-CAM visualization failed: {e}",
-                    exc_info=True
-                )
-
-                gradcam_image = None
-
-            # ---------------- RESULT STYLING ----------------
-
-            is_uncertain = confidence < LOW_CONFIDENCE_THRESHOLD
-
-            if is_uncertain:
-
-                style_class = "result-uncertain"
-                icon = "🟡"
-                headline = "Low Confidence — Uncertain"
-
-            elif label == "Real":
-
-                style_class = "result-real"
-                icon = "🟢"
-                headline = "Authentic image"
-
-            else:
-
-                style_class = "result-fake"
-                icon = "🔴"
-                headline = "Deepfake suspected"
-
-            st.markdown(
-                f"<div class='{style_class}' style='padding-left:0.8rem;'>",
-                unsafe_allow_html=True
-            )
-
-            st.markdown(f"### {icon} {headline}")
-
-            st.markdown(f"**Model prediction:** {label}")
-
-            st.progress(confidence)
-
-            st.caption(f"Confidence: {confidence * 100:.1f}%")
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            # ---------------- EXPLANATION ----------------
-
-            if is_uncertain:
-
-                st.warning(
-                    "Prediction confidence is low. "
-                    "Try another image for better accuracy."
-                )
-
-            elif label == "Fake":
-
-                st.error(
-                    "The model detected patterns consistent with deepfake artifacts."
-                )
-
-            else:
-
-                st.success(
-                    "The image appears consistent with natural content."
-                )
-
-            # ---------------- GRAD-CAM DISPLAY ----------------
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            st.subheader("🧠 Model Explainability (Grad-CAM)")
-
-            col_gc1, col_gc2 = st.columns(2)
-
-            with col_gc1:
-
-                st.image(
-                    image,
-                    channels="BGR",
-                    caption="Original Image",
-                    use_column_width=True
-                )
-
-            with col_gc2:
-
-                if gradcam_image is not None:
-
-                    st.image(
-                        gradcam_image,
-                        channels="BGR",
-                        caption="Grad-CAM Heatmap",
-                        use_column_width=True
-                    )
-
-                else:
-
-                    st.info(
-                        "Grad-CAM visualization unavailable."
-                    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- MODEL ANALYTICS ----------------
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-
-st.markdown("### 📊 Model Analytics Dashboard")
-
-metrics = get_sample_metrics()
-
-class_stats = get_class_statistics()
-
-col_acc, col_prec, col_rec, col_f1 = st.columns(4)
-
-with col_acc:
-    st.metric("Accuracy", f"{metrics['accuracy']:.1f}%")
-
-with col_prec:
-    st.metric("Precision", f"{metrics['precision']:.1f}%")
-
-with col_rec:
-    st.metric("Recall", f"{metrics['recall']:.1f}%")
-
-with col_f1:
-    st.metric("F1 Score", f"{metrics['f1_score']:.1f}%")
-
-st.divider()
-
-col_cm, col_roc = st.columns(2)
-
-with col_cm:
-
-    st.plotly_chart(
-        get_confusion_matrix_plot(),
-        use_container_width=True
-    )
-
-    st.caption(get_confusion_matrix_caption())
-
-with col_roc:
-
-    st.plotly_chart(
-        get_roc_curve_plot(),
-        use_container_width=True
-    )
-
-    st.caption(get_roc_curve_caption())
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- PREDICTION HISTORY ----------------
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-
-st.subheader("🕒 Prediction History")
-
-if (
-    "prediction_history" not in st.session_state
-    or len(st.session_state.prediction_history) == 0
-):
-
-    st.info("No predictions yet.")
-
-else:
-
-    df = pd.DataFrame(st.session_state.prediction_history)
-
-    st.dataframe(df, use_container_width=True)
-
-    csv = df.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        label="⬇️ Download Report as CSV",
-        data=csv,
-        file_name="pixeltruth_report.csv",
-        mime="text/csv"
-    )
-
-    if st.button("🗑️ Clear History"):
-
-        st.session_state.prediction_history = []
-
-        st.rerun()
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- FOOTER ----------------
-
-st.markdown(
-    """
-<div style="text-align:center; margin-top:3rem; color:#6b7280; font-size:0.8rem;">
-  <hr style="border-color:rgba(75,85,99,0.6);" />
-  <p>🕵️ PixelTruth • Built with Streamlit & TensorFlow</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+if __name__ == "__main__":
+    sys.exit(main())
