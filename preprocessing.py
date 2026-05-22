@@ -7,8 +7,19 @@ from tensorflow.keras.preprocessing.image import img_to_array
 
 TARGET_IMAGE_SIZE = (96, 96)
 
+MIN_IMAGE_DIM = 10
+
+def validate_image_dimensions(image: np.ndarray) -> None:
+    h, w = image.shape[:2]
+    if h < MIN_IMAGE_DIM or w < MIN_IMAGE_DIM:
+        raise ValueError(
+            f"Image too small ({w}x{h} px). "
+            f"Minimum is {MIN_IMAGE_DIM}x{MIN_IMAGE_DIM} px."
+        )
+
 
 def preprocess_image_array(image: np.ndarray) -> np.ndarray:
+    validate_image_dimensions(image)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image = cv2.resize(image, TARGET_IMAGE_SIZE)
     image = img_to_array(image)
