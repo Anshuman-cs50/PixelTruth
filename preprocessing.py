@@ -1,4 +1,6 @@
 from functools import lru_cache
+from PIL import Image, ImageOps
+from io import BytesIO
 
 import cv2
 import numpy as np
@@ -53,21 +55,20 @@ def batch_preprocess(images: list[np.ndarray]) -> np.ndarray:
 
 @lru_cache(maxsize=32)
 def decode_image_bytes(image_bytes: bytes) -> np.ndarray:
-    """Decode raw bytes into a BGR numpy array.
 
-    Raises
-    ------
-    ValueError
-        When the bytes cannot be decoded into a valid image.
-    """
-    file_array = np.asarray(bytearray(image_bytes), dtype=np.uint8)
-    image = cv2.imdecode(file_array, cv2.IMREAD_COLOR)
-    if image is None:
+    try:
+        pil_image = Image.open(BytesIO(image_bytes))
+        pil_image = ImageOps.exif_transpose(pil_image)
+        pil_image = pil_image.convert("RGB")
+        image = np.array(pil_image)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        return image
+
+    except Exception as e:
         raise ValueError(
-            "The uploaded file appears to be corrupted or is not a valid image."
+            f"The uploaded file appears to be corrupted or is not a valid image: {e}"
         )
-    return image
-
 
 @lru_cache(maxsize=32)
 def preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:
