@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 from tensorflow.keras.models import load_model
+import os
 
 from model_utils import (
     ensure_model_file,
@@ -14,8 +15,15 @@ MODEL_URL = get_model_url()
 MODEL_SHA256 = get_model_sha256()
 
 
+def get_model_mtime():
+    try:
+        return os.path.getmtime(MODEL_PATH)
+    except OSError:
+        return 0.0
+
+
 @st.cache_resource
-def load_cached_model():
+def load_cached_model(model_mtime):
     """
     Loads TensorFlow model only once.
     Performs warm-up inference to reduce first prediction latency.
