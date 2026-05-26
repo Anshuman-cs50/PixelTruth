@@ -5,4 +5,6 @@ real_and_fake_face_detection/
 dataset.zip
 *.h5
 
+metrics_cache.json
+
 .github/
