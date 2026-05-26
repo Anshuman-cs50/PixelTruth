@@ -92,18 +92,18 @@ class TestPreprocessImageArray:
                 f"Expected (1, 96, 96, 3) for input size {size}, got {result.shape}"
             )
 
-    def test_pixel_values_normalised(self):
+    def test_pixel_values_remain_in_model_input_range(self):
         image = make_blank_image()
         result = preprocessing.preprocess_image_array(image)
         assert result.min() >= 0.0
-        assert result.max() <= 1.0
+        assert result.max() <= 255.0
 
-    def test_white_image_normalises_to_1(self):
+    def test_white_image_remains_255_for_model_rescaling_layer(self):
         image = np.full((100, 100, 3), 255, dtype=np.uint8)
         result = preprocessing.preprocess_image_array(image)
-        assert np.allclose(result, 1.0)
+        assert np.allclose(result, 255.0)
 
-    def test_black_image_normalises_to_0(self):
+    def test_black_image_remains_0(self):
         image = np.zeros((100, 100, 3), dtype=np.uint8)
         result = preprocessing.preprocess_image_array(image)
         assert np.allclose(result, 0.0)
@@ -122,8 +122,8 @@ class TestPreprocessImageArray:
 
         result = preprocessing.preprocess_image_array(bgr)
 
-        assert np.allclose(result[0, :, :, 0], 200 / 255.0, atol=1e-5), "BGR→RGB channel 0 mismatch"
-        assert np.allclose(result[0, :, :, 2], 10 / 255.0, atol=1e-5), "BGR→RGB channel 2 mismatch"
+        assert np.allclose(result[0, :, :, 0], 200, atol=1e-5), "BGR to RGB channel 0 mismatch"
+        assert np.allclose(result[0, :, :, 2], 10, atol=1e-5), "BGR to RGB channel 2 mismatch"
 
     def test_none_input_raises(self):
         with pytest.raises(Exception):
