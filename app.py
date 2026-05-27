@@ -1,5 +1,4 @@
 import os
-import numpy as np
 import pandas as pd
 from datetime import datetime
 import streamlit as st
@@ -20,18 +19,7 @@ from inference import (
     find_last_conv_layer,
 )
 
-from metrics import (
-    get_sample_metrics,
-    get_confusion_matrix_plot,
-    get_roc_curve_plot,
-    get_dataset_distribution_plot,
-    get_class_statistics,
-    get_confusion_matrix_caption,
-    get_roc_curve_caption,
-    get_dataset_distribution_caption,
-)
-
-from utils.model_loader import load_cached_model , get_model_mtime
+from utils.model_loader import load_cached_model, get_model_mtime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -330,27 +318,19 @@ with col_right:
                 continue
 
             # --- run inference ---
-            label         = None
-            confidence    = None
-            processed_img = None
-
             try:
-                processed_img = preprocess_uploaded_image(raw_bytes)
-                prediction    = model.predict(processed_img, verbose=0)
-                class_label   = int(np.argmax(prediction, axis=1)[0])
-                confidence    = float(np.max(prediction))
-                label         = "Real" if class_label == 0 else "Fake"
-
+                # Use robust predict_image from inference.py to handle both sigmoid & softmax models correctly
+                label, confidence, processed_img = _predict_image(model, bgr_image)
+                if label is None:
+                    raise ModelExecutionError("Model prediction returned None.")
             except PreprocessingError as e:
                 logger.error(f"PreprocessingError for {uploaded_file.name}: {e}", exc_info=True)
                 batch_errors.append((uploaded_file.name, "Image preprocessing failed."))
                 continue
-
             except ModelExecutionError as e:
                 logger.error(f"ModelExecutionError for {uploaded_file.name}: {e}", exc_info=True)
                 batch_errors.append((uploaded_file.name, "Model inference failed."))
                 continue
-
             except Exception as e:
                 logger.error(f"Unexpected error for {uploaded_file.name}: {e}", exc_info=True)
                 batch_errors.append((uploaded_file.name, f"Unexpected error: {e}"))
@@ -359,9 +339,8 @@ with col_right:
             # --- Grad-CAM (best-effort, non-blocking) ---
             gradcam_image = None
             try:
-                backbone_model  = model.layers[0]
-                last_conv_layer = find_last_conv_layer(backbone_model)
-                heatmap         = make_gradcam_heatmap(processed_img, backbone_model, last_conv_layer)
+                last_conv_layer = find_last_conv_layer(model)
+                heatmap         = make_gradcam_heatmap(processed_img, model, last_conv_layer)
                 gradcam_image   = overlay_heatmap(bgr_image, heatmap)
             except Exception as e:
                 logger.warning(f"Grad-CAM failed for {uploaded_file.name}: {e}", exc_info=True)

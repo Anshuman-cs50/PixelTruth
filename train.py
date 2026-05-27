@@ -1,6 +1,7 @@
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dropout, Dense, BatchNormalization, GlobalAveragePooling2D, RandomFlip
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
