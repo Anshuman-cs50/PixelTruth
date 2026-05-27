@@ -35,12 +35,18 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer, pred_index=None):
     try:
         conv_output = last_conv_layer.output
     except Exception:
-        conv_output = last_conv_layer.get_output_at(0)
+        try:
+            conv_output = last_conv_layer.outputs[0]
+        except Exception:
+            conv_output = last_conv_layer.get_output_at(0)
 
     try:
         model_output = model.output
     except Exception:
-        model_output = model.get_output_at(0)
+        try:
+            model_output = model.outputs[0]
+        except Exception:
+            model_output = model.get_output_at(0)
 
     grad_model = tf.keras.models.Model(
         model.inputs,
